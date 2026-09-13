@@ -1,0 +1,1 @@
+{"training_date": "2026-09-13T10:44:22.107384", "model_type": "TF-IDF + LogisticRegression", "queue_metrics": {"accuracy": 0.4475671140939597, "macro_f1": 0.3182630794543881}}
