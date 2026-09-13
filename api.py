@@ -97,10 +97,10 @@ def ollama_chat(messages):
             "stream": False,
             "think": False,
             "options": {
-                "num_predict": 500
+                "num_predict": 120
             }
         },
-        timeout=180
+        timeout=120
     )
 
     response.raise_for_status()
@@ -216,37 +216,43 @@ def log_chat(
     tool_used: Optional[str] = None
 ):
 
-    with engine.begin() as conn:
+    try:
 
-        conn.execute(
-            text(
-                """
-                INSERT INTO chat_logs
-                (
-                    session_id,
-                    role,
-                    content,
-                    cited_ticket_ids,
-                    tool_used
-                )
-                VALUES
-                (
-                    :session_id,
-                    :role,
-                    :content,
-                    :cited_ids,
-                    :tool_used
-                )
-                """
-            ),
-            {
-                "session_id": session_id,
-                "role": role,
-                "content": message,
-                "cited_ids": cited_ids,
-                "tool_used": tool_used
-            }
-        )
+        with engine.begin() as conn:
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO chat_logs
+                    (
+                        session_id,
+                        role,
+                        content,
+                        cited_ticket_ids,
+                        tool_used
+                    )
+                    VALUES
+                    (
+                        :session_id,
+                        :role,
+                        :content,
+                        :cited_ids,
+                        :tool_used
+                    )
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "role": role,
+                    "content": message,
+                    "cited_ids": cited_ids,
+                    "tool_used": tool_used
+                }
+            )
+
+    except Exception as e:
+
+        print("Chat logging error:", e)
 
 
 # ==========================================
@@ -259,9 +265,8 @@ def clean_rag_answers(
 ):
 
     """
-    Extract concise troubleshooting advice
-    from retrieved support tickets while
-    removing ticket-specific filler.
+    Extract useful troubleshooting advice
+    from retrieved support tickets.
     """
 
     sentences = []
@@ -299,9 +304,9 @@ def clean_rag_answers(
 
     query_lower = user_query.lower()
 
-    # --------------------------------------
-    # Login / account questions
-    # --------------------------------------
+    # ======================================
+    # LOGIN / ACCOUNT
+    # ======================================
 
     if any(
         word in query_lower
@@ -312,7 +317,10 @@ def clean_rag_answers(
             "password",
             "account access",
             "cannot access",
-            "can't access"
+            "can't access",
+            "cannot log",
+            "can't log",
+            "unable to log"
         ]
     ):
 
@@ -332,9 +340,9 @@ def clean_rag_answers(
             "reset"
         ]
 
-    # --------------------------------------
-    # Payment questions
-    # --------------------------------------
+    # ======================================
+    # PAYMENT
+    # ======================================
 
     elif any(
         word in query_lower
@@ -366,9 +374,9 @@ def clean_rag_answers(
             "details"
         ]
 
-    # --------------------------------------
-    # Return / refund questions
-    # --------------------------------------
+    # ======================================
+    # RETURN / REFUND / EXCHANGE
+    # ======================================
 
     elif any(
         word in query_lower
@@ -377,7 +385,9 @@ def clean_rag_answers(
             "refund",
             "exchange",
             "wrong item",
-            "wrong product"
+            "wrong product",
+            "damaged item",
+            "damaged product"
         ]
     ):
 
@@ -390,9 +400,32 @@ def clean_rag_answers(
             "order"
         ]
 
-    # --------------------------------------
-    # General troubleshooting
-    # --------------------------------------
+    # ======================================
+    # DELIVERY / SHIPPING
+    # ======================================
+
+    elif any(
+        word in query_lower
+        for word in [
+            "delivery",
+            "shipping",
+            "shipment",
+            "delivered"
+        ]
+    ):
+
+        topic_words = [
+            "delivery",
+            "shipping",
+            "shipment",
+            "order",
+            "delivered",
+            "tracking"
+        ]
+
+    # ======================================
+    # GENERAL
+    # ======================================
 
     else:
 
@@ -410,9 +443,9 @@ def clean_rag_answers(
             "make sure"
         ]
 
-    # --------------------------------------
-    # Remove ticket-specific / useless text
-    # --------------------------------------
+    # ======================================
+    # UNWANTED PHRASES
+    # ======================================
 
     unwanted_phrases = [
 
@@ -436,12 +469,15 @@ def clean_rag_answers(
         "we are available",
 
         "provide your",
+        "provide us with",
         "share your",
         "please confirm your",
 
         "could you please confirm",
         "please provide",
         "please share",
+        "could you provide",
+        "could you share",
 
         "at your convenience",
 
@@ -468,7 +504,11 @@ def clean_rag_answers(
         "help us identify",
         "help us determine",
         "further investigate",
-        "investigate the issue"
+        "investigate the issue",
+
+        "i will look into",
+        "we will look into",
+        "look into the discrepancy"
     ]
 
     unwanted_starts = [
@@ -487,11 +527,25 @@ def clean_rag_answers(
         "would you"
     ]
 
+    actionable_words = [
+        "check",
+        "try",
+        "clear",
+        "update",
+        "reset",
+        "verify",
+        "ensure",
+        "make sure",
+        "use",
+        "switch",
+        "change"
+    ]
+
     candidates = []
 
-    # --------------------------------------
-    # Score sentences
-    # --------------------------------------
+    # ======================================
+    # SCORE SENTENCES
+    # ======================================
 
     for sentence in sentences:
 
@@ -502,13 +556,13 @@ def clean_rag_answers(
 
         lower = sentence.lower()
 
-        # Remove unwanted phrases
+        # Remove useless customer-service filler
         if any(
             phrase in lower
             for phrase in unwanted_phrases
         ):
             continue
-
+        
         if any(
             lower.startswith(start)
             for start in unwanted_starts
@@ -525,7 +579,7 @@ def clean_rag_answers(
         for keyword in topic_words:
 
             if keyword in lower:
-                score += 1
+                score += 3
 
         # Actionable language
         actionable_words = [
@@ -597,7 +651,7 @@ def clean_rag_answers(
         if not duplicate:
             useful_points.append(sentence)
 
-        if len(useful_points) >= 4:
+        if len(useful_points) >= 3:
             break
 
     return useful_points
@@ -669,14 +723,18 @@ def triage_ticket(
 
         # Category
         "category": predicted_category,
-        "predicted_category": predicted_category,
 
-        # Queue / assigned team
-        "predicted_queue": predicted_queue,
-        "queue_confidence": queue_confidence,
+        "predicted_category":
+            predicted_category,
 
-        # Priority
-        "predicted_priority": predicted_priority
+        "predicted_queue":
+            predicted_queue,
+
+        "queue_confidence":
+            queue_confidence,
+
+        "predicted_priority":
+            predicted_priority
     }
 
 
@@ -689,13 +747,31 @@ def chat_endpoint(
     request: ChatRequest
 ):
 
-    # --------------------------------------
-    # Get latest user message
-    # --------------------------------------
+    # ======================================
+    # GET USER MESSAGE
+    # ======================================
+
+    if not request.messages:
+
+        return {
+            "answer":
+                "Please enter a support question.",
+            "cited_ticket_ids": "",
+            "tool_used": "None"
+        }
 
     user_msg = (
         request.messages[-1].content
-    )
+    ).strip()
+
+    if not user_msg:
+
+        return {
+            "answer":
+                "Please enter a support question.",
+            "cited_ticket_ids": "",
+            "tool_used": "None"
+        }
 
     # Log user message
     log_chat(
@@ -704,204 +780,101 @@ def chat_endpoint(
         user_msg
     )
 
-    # --------------------------------------
-    # Ask Qwen which tool to use
-    # --------------------------------------
+    user_lower = user_msg.lower()
 
-    router_prompt = """
-You are the routing component of an AI customer support system.
+    # ======================================
+    # FAST LOCAL ROUTING
+    #
+    # This prevents Qwen from being used
+    # for obvious support questions.
+    # ======================================
 
-You have exactly two tools.
+    support_keywords = [
 
-TOOL 1: SEARCH_TICKETS
+        "login",
+        "log in",
+        "sign in",
+        "password",
+        "account",
+        "access",
 
-Use SEARCH_TICKETS for ANY customer support problem or request,
-including but not limited to:
+        "payment",
+        "pay",
+        "paid",
+        "card",
+        "charged",
+        "declined",
+        "billing",
 
-- login problems
-- password problems
-- account access
-- payment problems
-- card problems
-- billing problems
-- declined payments
-- refunds
-- returns
-- exchanges
-- wrong items
-- wrong products
-- damaged products
-- orders
-- delivery problems
-- technical problems
-- product problems
-- troubleshooting
-- requests asking how to solve a customer issue
+        "refund",
+        "return",
+        "exchange",
+        "wrong item",
+        "wrong product",
+        "damaged item",
+        "damaged product",
 
-TOOL 2: QUERY_STATS
+        "order",
+        "delivery",
+        "shipping",
+        "shipment",
+        "tracking",
 
-Use QUERY_STATS ONLY when the user asks about numerical
-information or statistics from the ticket dataset, such as:
-
-- number of tickets
-- ticket counts
-- counts by queue
-- counts by priority
-- statistics
-- dataset statistics
-
-IMPORTANT:
-
-If the user describes a customer problem, ALWAYS use
-SEARCH_TICKETS, even if the problem involves returns,
-refunds, exchanges, orders, payments, login, or products.
-
-If the user asks a non-support question such as:
-"What is the capital of France?"
-do NOT use either tool.
-
-For SEARCH_TICKETS, output exactly:
-
-TOOL: SEARCH_TICKETS | <search query>
-
-For statistics, output exactly:
-
-TOOL: QUERY_STATS
-
-Do not provide an answer.
-Do not explain your choice.
-Output only the tool command.
-"""
-
-    messages = [
-        {
-            "role": "system",
-            "content": router_prompt
-        },
-        {
-            "role": "user",
-            "content": user_msg
-        }
+        "technical",
+        "error",
+        "problem",
+        "issue",
+        "trouble",
+        "unable",
+        "cannot",
+        "can't",
+        "failed",
+        "failure",
+        "help",
+        "support"
     ]
 
-    try:
+    stats_keywords = [
+        "how many",
+        "number of",
+        "count",
+        "counts",
+        "statistics",
+        "statistic",
+        "dataset statistics"
+    ]
 
-        router_output = ollama_chat(
-            messages
+    stats_topics = [
+        "ticket",
+        "tickets",
+        "queue",
+        "queues",
+        "priority",
+        "priorities"
+    ]
+
+    is_stats = (
+        any(
+            word in user_lower
+            for word in stats_keywords
         )
-
-    except Exception as e:
-
-        return {
-            "answer":
-                "I couldn't connect to the AI assistant. "
-                "Please make sure Ollama and Qwen3 are running.",
-            "cited_ticket_ids": "",
-            "tool_used": "None"
-        }
-
-    # --------------------------------------
-    # SEARCH_TICKETS
-    # --------------------------------------
-
-    if router_output.startswith(
-        "TOOL: SEARCH_TICKETS"
-    ):
-
-        tool_used = (
-            "search_similar_tickets"
+        and
+        any(
+            word in user_lower
+            for word in stats_topics
         )
+    )
 
-        parts = router_output.split(
-            "|",
-            1
-        )
-
-        if len(parts) > 1:
-
-            search_query = (
-                parts[1].strip()
-            )
-
-        else:
-
-            search_query = user_msg
-
-        search_results = (
-            search_similar_tickets(
-                search_query,
-                k=3,
-                threshold=0.45
-            )
-        )
-
-        # ----------------------------------
-        # No relevant results
-        # ----------------------------------
-
-        if not search_results:
-
-            final_answer = (
-                "I couldn't find sufficiently "
-                "similar support tickets to answer "
-                "this confidently."
-            )
-
-            cited_ticket_ids = ""
-
-        else:
-
-            # ----------------------------------
-            # Clean retrieved answers
-            # ----------------------------------
-
-            useful_points = (
-                clean_rag_answers(
-                    search_results,
-                    user_msg
-                )
-            )
-
-            # ----------------------------------
-            # If nothing useful survived cleaning
-            # ----------------------------------
-
-            if not useful_points:
-
-                final_answer = (
-                    "I couldn't find sufficiently "
-                    "similar support tickets to answer "
-                    "this confidently."
-                )
-
-            else:
-
-                final_answer = (
-                    "Based on similar support tickets, "
-                    "you can try:\n\n"
-                    + "\n".join(
-                        f"- {point}"
-                        for point in useful_points
-                    )
-                )
-
-            # ----------------------------------
-            # Citation IDs
-            # ----------------------------------
-
-            cited_ticket_ids = ", ".join(
-                str(result["id"])
-                for result in search_results
-            )
-
+    is_support = any(
+        word in user_lower
+        for word in support_keywords
+    )
 
     # ======================================
-    # QUERY_STATS
+    # TOOL: QUERY STATS
     # ======================================
 
-    elif router_output.startswith(
-        "TOOL: QUERY_STATS"
-    ):
+    if is_stats:
 
         tool_used = "query_stats"
 
@@ -915,12 +888,9 @@ Output only the tool command.
             stats["priority_counts"]
         )
 
-        # ----------------------------------
-        # Queue count question
-        # ----------------------------------
-
+        # Queue question
         if any(
-            word in user_msg.lower()
+            word in user_lower
             for word in [
                 "queue",
                 "queues"
@@ -942,12 +912,9 @@ Output only the tool command.
                 + "\n".join(lines)
             )
 
-        # ----------------------------------
-        # Priority count question
-        # ----------------------------------
-
+        # Priority question
         elif any(
-            word in user_msg.lower()
+            word in user_lower
             for word in [
                 "priority",
                 "priorities"
@@ -969,10 +936,7 @@ Output only the tool command.
                 + "\n".join(lines)
             )
 
-        # ----------------------------------
-        # General stats
-        # ----------------------------------
-
+        # General statistics
         else:
 
             queue_lines = []
@@ -1005,9 +969,72 @@ Output only the tool command.
 
         cited_ticket_ids = ""
 
+    # ======================================
+    # TOOL: SEARCH TICKETS
+    # ======================================
+
+    elif is_support:
+
+        tool_used = "search_similar_tickets"
+
+        # IMPORTANT:
+        # Use the original user question.
+        # This is more reliable than asking Qwen
+        # to rewrite the search query.
+        search_results = (
+            search_similar_tickets(
+                user_msg,
+                k=3,
+                threshold=0.45
+            )
+        )
+
+        # No relevant results
+        if not search_results:
+
+            final_answer = (
+                "I couldn't find sufficiently "
+                "similar support tickets to answer "
+                "this confidently."
+            )
+
+            cited_ticket_ids = ""
+
+        else:
+
+            useful_points = (
+                clean_rag_answers(
+                    search_results,
+                    user_msg
+                )
+            )
+
+            if not useful_points:
+
+                final_answer = (
+                    "I couldn't find sufficiently "
+                    "similar support tickets to answer "
+                    "this confidently."
+                )
+
+            else:
+
+                final_answer = (
+                    "Based on similar support tickets, "
+                    "you can try:\n\n"
+                    + "\n".join(
+                        f"- {point}"
+                        for point in useful_points
+                    )
+                )
+
+            cited_ticket_ids = ", ".join(
+                str(result["id"])
+                for result in search_results
+            )
 
     # ======================================
-    # UNKNOWN / NON-SUPPORT REQUEST
+    # UNKNOWN / NON-SUPPORT
     # ======================================
 
     else:
@@ -1036,7 +1063,7 @@ Output only the tool command.
 
 
     # ======================================
-    # RETURN RESPONSE
+    # RETURN
     # ======================================
 
     return {
