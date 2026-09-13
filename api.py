@@ -509,7 +509,6 @@ def clean_rag_answers(
         ):
             continue
 
-        # Remove unwanted starts
         if any(
             lower.startswith(start)
             for start in unwanted_starts
